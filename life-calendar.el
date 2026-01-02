@@ -6,7 +6,7 @@
 ;; URL: https://github.com/vshender/emacs-life-calendar
 ;; Version: 0.1.0
 ;; Keywords: calendar, visualization
-;; Package-Requires: ((emacs "24.1") (org "8.0"))
+;; Package-Requires: ((emacs "27.1") (org "8.0"))
 ;; SPDX-License-Identifier: ISC
 
 ;; This file is not part of GNU Emacs.
@@ -64,6 +64,20 @@ If nil, you will be prompted to enter it on first use."
   :type 'string
   :group 'life-calendar)
 
+(defcustom life-calendar-week-start-day 'birthday
+  "Day of week when a new week of life is counted.
+If `birthday', use the day of week you were born (default).
+Otherwise, use a day symbol: `sunday', `monday', etc."
+  :type '(choice (const :tag "Day of week of birthday" birthday)
+                 (const :tag "Sunday" sunday)
+                 (const :tag "Monday" monday)
+                 (const :tag "Tuesday" tuesday)
+                 (const :tag "Wednesday" wednesday)
+                 (const :tag "Thursday" thursday)
+                 (const :tag "Friday" friday)
+                 (const :tag "Saturday" saturday))
+  :group 'life-calendar)
+
 ;;; Faces
 
 (defface life-calendar-past-face
@@ -93,37 +107,123 @@ If nil, you will be prompted to enter it on first use."
 
 ;;; Internal Functions
 
-(defun life-calendar--ensure-birthday ()
-  "Ensure `life-calendar-birthday' is set.
-If not set, prompt the user to enter their birthday using `org-read-date'
-and save the value for future sessions."
-  (unless life-calendar-birthday
-    (let ((date (org-read-date nil nil nil "Enter your birthday: ")))
-      (customize-save-variable 'life-calendar-birthday date)
-      (message "Birthday saved: %s" date)))
-  life-calendar-birthday)
+;; Dates are represented as Emacs time values with hours, minutes, and seconds
+;; set to zero.  UTC is used to avoid daylight saving time issues with date
+;; arithmetic.
+
+(defun life-calendar--encode-date (year month day)
+  "Encode YEAR, MONTH, DAY as a time value in UTC."
+  (encode-time (list 0 0 0 day month year nil nil t)))
+
+(defun life-calendar--decode-date (time)
+  "Decode TIME to a decoded time structure in UTC."
+  (decode-time time t))
+
+(defun life-calendar--current-date ()
+  "Return today's date as a time value."
+  (let ((decoded (life-calendar--decode-date (current-time))))
+    (life-calendar--encode-date (decoded-time-year decoded)
+                                (decoded-time-month decoded)
+                                (decoded-time-day decoded))))
 
 (defun life-calendar--parse-date (date-string)
   "Parse DATE-STRING in YYYY-MM-DD format to a time value."
-  (let ((parts (split-string date-string "-")))
-    (encode-time 0 0 0
-                 (string-to-number (nth 2 parts))
-                 (string-to-number (nth 1 parts))
-                 (string-to-number (nth 0 parts)))))
+  (pcase-let ((`(,year ,month ,day)
+               (mapcar #'string-to-number (split-string date-string "-"))))
+    (life-calendar--encode-date year month day)))
 
-(defun life-calendar--weeks-since-birth (birthday)
-  "Calculate the number of weeks since BIRTHDAY until now.
-BIRTHDAY is a string in YYYY-MM-DD format."
-  (let* ((birth-time (life-calendar--parse-date birthday))
-         (now (current-time))
-         (diff (float-time (time-subtract now birth-time)))
-         (weeks (floor (/ diff (* 7 24 60 60)))))
+(defun life-calendar--day-of-week (time)
+  "Return day of week for TIME (0=Sunday, 1=Monday, ..., 6=Saturday)."
+  (decoded-time-weekday (life-calendar--decode-date time)))
+
+(defun life-calendar--dow-symbol-to-number (dow)
+  "Convert DOW symbol to number (0=Sunday, ..., 6=Saturday)."
+  (pcase dow
+    ('sunday 0)
+    ('monday 1)
+    ('tuesday 2)
+    ('wednesday 3)
+    ('thursday 4)
+    ('friday 5)
+    ('saturday 6)
+    (_ (error "Invalid day of week: %s" dow))))
+
+(defun life-calendar--add-days (time days)
+  "Add DAYS to TIME and return the new time."
+  (time-add time (seconds-to-time (* days 24 60 60))))
+
+(defun life-calendar--nth-birthday (birth-time n)
+  "Return the date of the Nth birthday given BIRTH-TIME.
+N=0 returns the birth date itself."
+  (let ((decoded (life-calendar--decode-date birth-time)))
+    (life-calendar--encode-date (+ (decoded-time-year decoded) n)
+                                (decoded-time-month decoded)
+                                (decoded-time-day decoded))))
+
+(defun life-calendar--effective-week-start-dow (birth-time)
+  "Return the effective day of week for counting weeks as a number.
+If `life-calendar-week-start-day' is `birthday', return the day of week
+of BIRTH-TIME.  Otherwise convert the configured day symbol to a number."
+  (if (eq life-calendar-week-start-day 'birthday)
+      (life-calendar--day-of-week birth-time)
+    (life-calendar--dow-symbol-to-number life-calendar-week-start-day)))
+
+(defun life-calendar--last-week-start-on-or-before (time dow)
+  "Return the last occurrence of day-of-week DOW on or before TIME."
+  (let* ((time-dow (life-calendar--day-of-week time))
+         (days-back (mod (- time-dow dow) 7)))
+    (life-calendar--add-days time (- days-back))))
+
+(defun life-calendar--count-completed-weeks (start-week-dow from-date before-date)
+  "Count weeks that complete in the interval [FROM-DATE, BEFORE-DATE).
+START-WEEK-DOW is the day of week (0=Sunday, ..., 6=Saturday) when weeks start.
+A week is counted if its completion day (last day) falls within the interval."
+  (let* (;; Find the completion day (last day) of the week containing
+         ;; `from-date'.  Since a week that completes before `from-date'
+         ;; doesn't belong to the interval, this is the first `week-completion'
+         ;; to consider.
+         (first-week-start (life-calendar--last-week-start-on-or-before
+                            from-date start-week-dow))
+         (week-completion (life-calendar--add-days first-week-start 6))
+         (weeks 0))
+    (while (time-less-p week-completion before-date)
+      (setq weeks (1+ weeks))
+      (setq week-completion (life-calendar--add-days week-completion 7)))
     weeks))
+
+(defun life-calendar--count-weeks-in-year (birth-time year-num)
+  "Count weeks in YEAR-NUM of life (0-indexed) for BIRTH-TIME.
+Returns the number of weeks that complete within the year.  A week
+is counted if it completes in the interval [birthday-N, birthday-N+1).
+This is typically 52, occasionally 53."
+  (life-calendar--count-completed-weeks
+   (life-calendar--effective-week-start-dow birth-time)
+   (life-calendar--nth-birthday birth-time year-num)
+   (life-calendar--nth-birthday birth-time (1+ year-num))))
+
+(defun life-calendar--current-age (birth-time)
+  "Return (YEARS-LIVED WEEKS-LIVED) for today given BIRTH-TIME.
+YEARS-LIVED is the number of complete years, WEEKS-LIVED is the number
+of complete weeks within the current year.  Uses the configured week
+start day for accurate calculation."
+  (let* ((today (life-calendar--current-date))
+         ;; Calculate years lived by decoding the time difference.
+         ;; Subtracting the epoch year converts the decoded year to a duration.
+         (years-lived (- (decoded-time-year
+                          (life-calendar--decode-date (time-subtract today birth-time)))
+                         (decoded-time-year
+                          (life-calendar--decode-date 0))))
+         (current-birthday (life-calendar--nth-birthday birth-time years-lived))
+         (weeks-lived (life-calendar--count-completed-weeks
+                       (life-calendar--effective-week-start-dow birth-time)
+                       current-birthday
+                       today)))
+    (list years-lived weeks-lived)))
 
 (defun life-calendar--render-week-header ()
   "Render the week number header line.
 Shows week numbers at positions 1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50."
-  (let ((header (make-string 52 ?\s))
+  (let ((header (make-string 53 ?\s))
         (week-marks '(1 5 10 15 20 25 30 35 40 45 50)))
     (dolist (week week-marks)
       (let* ((pos (1- week))
@@ -135,39 +235,42 @@ Shows week numbers at positions 1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50."
             (propertize header 'face 'life-calendar-age-face)
             "\n")))
 
-(defun life-calendar--render-calendar (birthday years)
-  "Render the life calendar for BIRTHDAY with YEARS total years.
+(defun life-calendar--render-calendar (birth-time years)
+  "Render the life calendar for BIRTH-TIME with YEARS total years.
 Returns a string containing the rendered calendar."
-  (let* ((total-weeks (* years 52))
-         (weeks-lived (life-calendar--weeks-since-birth birthday))
-         (years-lived (/ weeks-lived 52))
-         (week-of-year (mod weeks-lived 52))
-         (years (max years (1+ years-lived)))
-         (lines '()))
+  (pcase-let* ((`(,years-lived ,weeks-lived)
+               (life-calendar--current-age birth-time))
+               (years (max years (1+ years-lived)))
+               (lines '()))
     ;; Header
     (push (propertize
            (format "Life Calendar - %d years, %d weeks old\n\n"
-                   years-lived week-of-year)
+                   years-lived weeks-lived)
            'face 'life-calendar-header-face)
           lines)
     ;; Week numbers header
     (push (life-calendar--render-week-header) lines)
     ;; Calendar grid
     (dotimes (year years)
-      (let ((row-parts '()))
+      (let* ((weeks-in-year (life-calendar--count-weeks-in-year birth-time year))
+             (row-parts '()))
         ;; Age label
         (push (propertize (format "%3d: " year) 'face 'life-calendar-age-face)
               row-parts)
         ;; Weeks
-        (dotimes (week 52)
-          (let* ((week-number (+ (* year 52) week))
+        (dotimes (week weeks-in-year)
+          (let* ((is-current-year (= year years-lived))
+                 (is-past-year (< year years-lived))
+                 (is-current-week (and is-current-year (= week weeks-lived)))
+                 (is-past-week (or is-past-year
+                                   (and is-current-year (< week weeks-lived))))
                  (char (cond
-                        ((< week-number weeks-lived)
-                         (propertize life-calendar-past-char
-                                     'face 'life-calendar-past-face))
-                        ((= week-number weeks-lived)
+                        (is-current-week
                          (propertize life-calendar-current-char
                                      'face 'life-calendar-current-face))
+                        (is-past-week
+                         (propertize life-calendar-past-char
+                                     'face 'life-calendar-past-face))
                         (t
                          (propertize life-calendar-future-char
                                      'face 'life-calendar-future-face)))))
@@ -175,6 +278,16 @@ Returns a string containing the rendered calendar."
         (push (apply #'concat (nreverse row-parts)) lines)
         (push "\n" lines)))
     (apply #'concat (nreverse lines))))
+
+(defun life-calendar--ensure-birthday ()
+  "Ensure `life-calendar-birthday' is set.
+If not set, prompt the user to enter their birthday using `org-read-date'
+and save the value for future sessions."
+  (unless life-calendar-birthday
+    (let ((date (org-read-date nil nil nil "Enter your birthday: ")))
+      (customize-save-variable 'life-calendar-birthday date)
+      (message "Birthday saved: %s" date)))
+  life-calendar-birthday)
 
 ;;; Major Mode
 
@@ -198,10 +311,11 @@ Returns a string containing the rendered calendar."
   "Refresh the life calendar display."
   (interactive)
   (when (eq major-mode 'life-calendar-mode)
-    (let ((birthday (life-calendar--ensure-birthday))
-          (inhibit-read-only t))
+    (let* ((birthday (life-calendar--ensure-birthday))
+           (birth-time (life-calendar--parse-date birthday))
+           (inhibit-read-only t))
       (erase-buffer)
-      (insert (life-calendar--render-calendar birthday life-calendar-years))
+      (insert (life-calendar--render-calendar birth-time life-calendar-years))
       (goto-char (point-min)))))
 
 ;;;###autoload
@@ -216,11 +330,12 @@ On first use, you will be prompted to enter your birthday.
 Press \\<life-calendar-mode-map>\\[quit-window] to close the calendar,
 \\<life-calendar-mode-map>\\[life-calendar-refresh] to refresh."
   (interactive)
-  (let ((birthday (life-calendar--ensure-birthday)))
+  (let* ((birthday (life-calendar--ensure-birthday))
+         (birth-time (life-calendar--parse-date birthday)))
     (switch-to-buffer (get-buffer-create "*Life Calendar*"))
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (insert (life-calendar--render-calendar birthday life-calendar-years)))
+      (insert (life-calendar--render-calendar birth-time life-calendar-years)))
     (goto-char (point-min))
     (life-calendar-mode)))
 
