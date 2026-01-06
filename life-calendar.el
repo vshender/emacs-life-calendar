@@ -202,6 +202,15 @@ Otherwise, calculate based on window width."
                                 (decoded-time-month decoded)
                                 (decoded-time-day decoded))))
 
+(defun life-calendar--valid-date-string-p (date-string)
+  "Return non-nil if DATE-STRING is a valid date in YYYY-MM-DD format."
+  (and (stringp date-string)
+       (string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'" date-string)
+       (let ((year (string-to-number (match-string 1 date-string)))
+             (month (string-to-number (match-string 2 date-string)))
+             (day (string-to-number (match-string 3 date-string))))
+         (calendar-date-is-valid-p (list month day year)))))
+
 (defun life-calendar--read-date-string (prompt)
   "Read a date from the user with PROMPT, returning YYYY-MM-DD string.
 Validates the date format and signals an error if invalid or empty."
@@ -209,26 +218,16 @@ Validates the date format and signals an error if invalid or empty."
     (cond
      ((string-empty-p input)
       (user-error "Date is required"))
-     ((string-match "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)\\'" input)
-      (let ((year (string-to-number (match-string 1 input)))
-            (month (string-to-number (match-string 2 input)))
-            (day (string-to-number (match-string 3 input))))
-        (if (calendar-date-is-valid-p (list month day year))
-            input
-          (user-error "Invalid date: %s" input))))
+     ((life-calendar--valid-date-string-p input)
+      input)
      (t
-      (user-error "Invalid date format.  Please use YYYY-MM-DD")))))
+      (user-error "Invalid date: %s" input)))))
 
 (defun life-calendar--parse-date (date-string)
   "Parse DATE-STRING in YYYY-MM-DD format to a time value."
   (pcase-let ((`(,year ,month ,day)
                (mapcar #'string-to-number (split-string date-string "-"))))
     (life-calendar--encode-date year month day)))
-
-(defun life-calendar--validate-birthday (birth-time)
-  "Signal an error if BIRTH-TIME is in the future."
-  (when (time-less-p (life-calendar--current-date) birth-time)
-    (user-error "Birthday cannot be in the future")))
 
 (defun life-calendar--day-of-week (time)
   "Return day of week for TIME (0=Sunday, 1=Monday, ..., 6=Saturday)."
@@ -329,23 +328,38 @@ Returns nil if the date is before birth."
   "Return (YEARS-LIVED . WEEKS-LIVED) for today given BIRTH-TIME.
 YEARS-LIVED is the number of complete years, WEEKS-LIVED is the number
 of complete weeks within the current year.  Uses the configured week
-start day for accurate calculation.
-Signals an error if BIRTH-TIME is in the future."
-  (life-calendar--validate-birthday birth-time)
+start day for accurate calculation."
   (life-calendar--time-to-year-week birth-time (life-calendar--current-date)))
 
 ;;; Life Chapters
 
 (defun life-calendar--build-chapters-index (birth-time)
   "Build a hash table mapping (YEAR . WEEK) to list of chapter descriptions.
-Uses BIRTH-TIME to convert chapter dates to year/week coordinates."
+Uses BIRTH-TIME to convert chapter dates to year/week coordinates.
+Invalid chapters are skipped with a warning."
   (let ((index (make-hash-table :test 'equal)))
     (dolist (chapter life-calendar-chapters)
       (let* ((date (car chapter))
              (description (cdr chapter))
-             (year-week (life-calendar--date-string-to-year-week birth-time date)))
-        (when year-week
-          (push (format "%s: %s" date description) (gethash year-week index)))))
+             (invalid-reason
+              (cond
+               ((not (life-calendar--valid-date-string-p date))
+                (format "invalid date format: %s" date))
+               ((not (stringp description))
+                (format "description is not a string for date %s" date))
+               ((string-empty-p description)
+                (format "empty description for date %s" date)))))
+        (if invalid-reason
+            (display-warning 'life-calendar
+                             (format "Skipping invalid chapter: %s" invalid-reason)
+                             :warning)
+          (let ((year-week (life-calendar--date-string-to-year-week birth-time date)))
+            (if (null year-week)
+                (display-warning 'life-calendar
+                                 (format "Skipping chapter before birthday: %s" date)
+                                 :warning)
+              (push (format "%s: %s" date description)
+                    (gethash year-week index)))))))
     index))
 
 (defvar-local life-calendar--chapters-index nil
@@ -360,11 +374,10 @@ Returns nil if no chapters exist for this week."
 
 (defun life-calendar--show-chapters-at-point ()
   "Display chapter descriptions for the week at point in the echo area."
-  (when (eq major-mode 'life-calendar-mode)
-    (let ((chapters (get-text-property (point) 'life-calendar-chapters)))
-      (when chapters
-        (message "%s"
-                 (mapconcat #'identity chapters "\n"))))))
+  (let ((chapters (get-text-property (point) 'life-calendar-chapters)))
+    (when chapters
+      (message "%s"
+               (mapconcat #'identity chapters "\n")))))
 
 ;;; Rendering
 
@@ -479,13 +492,40 @@ as side effects."
 ;;; Birthday Management
 
 (defun life-calendar--ensure-birthday ()
-  "Ensure `life-calendar-birthday' is set.
-If not set, prompt the user to enter their birthday and save the value
-for future sessions."
-  (unless life-calendar-birthday
-    (let ((date (life-calendar--read-date-string "Enter your birthday")))
-      (customize-save-variable 'life-calendar-birthday date)
-      (message "Birthday saved: %s" date)))
+  "Ensure `life-calendar-birthday' is set to a valid date.
+If the saved birthday is invalid, warn and prompt for a new one.
+If not set, prompt the user to enter their birthday.
+Loops until a valid date is entered; user can abort with \\[keyboard-quit]."
+  ;; Validate saved birthday if present.
+  (when life-calendar-birthday
+    (let ((invalid-reason
+           (cond
+            ((not (life-calendar--valid-date-string-p life-calendar-birthday))
+             (format "invalid date format: %s" life-calendar-birthday))
+            ((time-less-p (life-calendar--current-date)
+                          (life-calendar--parse-date life-calendar-birthday))
+             (format "birthday is in the future: %s" life-calendar-birthday)))))
+      (when invalid-reason
+        (display-warning 'life-calendar
+                         (format "Saved birthday is invalid: %s" invalid-reason)
+                         :warning)
+        (setq life-calendar-birthday nil))))
+  ;; Prompt for birthday if not set, loop until valid.
+  (let ((prompt "Enter your birthday"))
+    (while (null life-calendar-birthday)
+      (condition-case err
+          (let ((date (life-calendar--read-date-string prompt)))
+            (cond
+             ((time-less-p (life-calendar--current-date)
+                           (life-calendar--parse-date date))
+              (setq prompt
+                    "Birthday cannot be in the future.  Enter your birthday"))
+             (t
+              (customize-save-variable 'life-calendar-birthday date)
+              (message "Birthday saved: %s" date))))
+        (user-error
+         (setq prompt
+               (format "%s.  Enter your birthday" (error-message-string err)))))))
   life-calendar-birthday)
 
 ;;; Navigation
@@ -690,11 +730,34 @@ With multi-column display, this moves up by the number of columns."
 (defun life-calendar-add-chapter ()
   "Add a new life chapter.
 Prompts for a date and description, saves to `life-calendar-chapters',
-refreshes the display, and moves point to the new chapter's week."
+refreshes the display, and moves point to the new chapter's week.
+Loops until valid date and description are entered; user can abort
+with \\[keyboard-quit]."
   (interactive)
-  (let* ((date (life-calendar--read-date-string "Chapter date"))
-         (description (when date (read-string "Chapter description: "))))
-    (when (and date (not (string-empty-p description)))
+  (let* ((birthday (life-calendar--ensure-birthday))
+         (birth-time (life-calendar--parse-date birthday))
+         (prompt "Chapter date")
+         (date nil))
+    ;; Loop until valid date is entered.
+    (while (null date)
+      (condition-case err
+          (let ((input (life-calendar--read-date-string prompt)))
+            (if (time-less-p (life-calendar--parse-date input) birth-time)
+                (setq prompt
+                      (format "Chapter date cannot be before birthday (%s).  Chapter date"
+                              birthday))
+              (setq date input)))
+        (user-error
+         (setq prompt
+               (format "%s.  Chapter date" (error-message-string err))))))
+    ;; Loop until valid description is entered.
+    (let ((desc-prompt "Chapter description")
+          (description nil))
+      (while (null description)
+        (let ((input (read-string (concat desc-prompt ": "))))
+          (if (string-empty-p input)
+              (setq desc-prompt "Description is required.  Chapter description")
+            (setq description input))))
       (customize-save-variable
        'life-calendar-chapters
        (cons (cons date description) life-calendar-chapters))
