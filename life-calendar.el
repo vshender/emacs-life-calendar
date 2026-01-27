@@ -175,8 +175,8 @@ If `life-calendar-data-file' is nil, falls back to `customize-save-variable'."
   (if life-calendar-data-file
       (progn
         ;; Create directory if it doesn't exist
-        (let ((dir (file-name-directory life-calendar-data-file)))
-          (when dir
+        (let ((dir (file-name-directory (expand-file-name life-calendar-data-file))))
+          (when (and dir (not (string-empty-p dir)))
             (make-directory dir t)))
         ;; Read existing data or start fresh
         (let ((data nil))
@@ -190,9 +190,13 @@ If `life-calendar-data-file' is nil, falls back to `customize-save-variable'."
                   (while (not (eobp))
                     (let ((form (read (current-buffer))))
                       (when (and (listp form) (eq (car form) 'setq))
-                        (let ((var (nth 1 form))
-                              (val (nth 2 form)))
-                          (setq data (cons (list var val) data))))))
+                        ;; Handle setq with multiple var-value pairs
+                        (let ((args (cdr form)))
+                          (while (>= (length args) 2)
+                            (let ((var (car args))
+                                  (val (cadr args)))
+                              (setq data (cons (list var val) data))
+                              (setq args (cddr args))))))))
                 (end-of-file nil))))
           ;; Update or add the variable
           (if (assq variable data)
