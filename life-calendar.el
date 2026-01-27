@@ -193,8 +193,10 @@ If `life-calendar-data-file' is nil, falls back to `customize-save-variable'."
                         ;; Handle setq with multiple var-value pairs
                         (let ((args (cdr form)))
                           (while (>= (length args) 2)
-                            (let ((var (car args))
-                                  (val (cadr args)))
+                            (let* ((var (car args))
+                                   (val-form (cadr args))
+                                   ;; Evaluate the value form to handle quoted values
+                                   (val (eval val-form t)))
                               (setq data (cons (list var val) data))
                               (setq args (cddr args))))))))
                 (end-of-file nil))))
