@@ -63,11 +63,23 @@ On first use, you will be prompted to enter your birthday (in YYYY-MM-DD format)
 
 ### Data Storage
 
-Your birthday and life chapters are saved as Emacs custom variables (`life-calendar-birthday` and `life-calendar-chapters`), typically stored in your `custom-file` (often `~/.emacs.d/custom.el` or within your init file).
+Your birthday and life chapters are saved as Emacs custom variables (`life-calendar-birthday` and `life-calendar-chapters`).
+
+By default, these are stored in your `custom-file` (often `~/.emacs.d/custom.el` or within your init file).
+
+#### Custom Data File
+
+You can specify a dedicated file for storing life calendar data by setting `life-calendar-data-file`:
+
+```elisp
+(setq life-calendar-data-file "~/.emacs.d/life-calendar-data.el")
+```
+
+When this variable is set, your birthday and life chapters will be saved to the specified file instead of the `custom-file`. This keeps your life calendar data separate from other Emacs customizations.
 
 To change your birthday or edit life chapters manually:
 - Use `M-x customize-variable RET life-calendar-birthday RET`, or
-- Edit the saved values directly in your custom file
+- Edit the saved values directly in your custom file (or `life-calendar-data-file` if configured)
 
 ### Keybindings
 
@@ -110,6 +122,10 @@ Run `M-x customize-group RET life-calendar RET` to customize all options, or set
 ```elisp
 ;; Your birthday (set automatically on first use, or set manually).
 (setq life-calendar-birthday "1990-05-15")
+
+;; File to store life calendar data (default: nil, uses custom-file).
+;; Set this to a specific file to keep data separate from custom-file.
+(setq life-calendar-data-file "~/.emacs.d/life-calendar-data.el")
 
 ;; Number of years to display (default: 90).
 (setq life-calendar-years 100)
